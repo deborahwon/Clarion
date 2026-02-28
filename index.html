@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clarion</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Space+Mono:wght@400&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --paper:  #f2ede4;
+  --ink:    #1c1812;
+  --ash:    #7a746a;
+  --ui-bg:  rgba(242,237,228,0.93);
+  --shadow: 0 2px 20px rgba(28,24,18,0.10);
+  --red:    #b84040;
+}
+
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: var(--paper);
+  font-family: 'Space Mono', monospace;
+  cursor: none;
+}
+
+/* ── Canvas stack ──────────────────────────────────── */
+#stage { position: fixed; inset: 0; }
+
+/* BUG 7 FIX: removed #c-live — it was never used, just wasted a composite layer */
+#c-paper, #c-acc, #c-skel {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+}
+#c-skel { pointer-events: none; }
+
+/* Paper grain overlay */
+#stage::after {
+  content: ''; position: absolute; inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.72' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='400' height='400' filter='url(%23g)' opacity='0.05'/%3E%3C/svg%3E");
+  pointer-events: none; z-index: 8; mix-blend-mode: multiply;
+}
+
+/* ── Camera PiP ────────────────────────────────────── */
+#cam-pip {
+  position: fixed; bottom: 24px; left: 24px; z-index: 30;
+  width: 160px;
+  border: 1px solid rgba(28,24,18,0.12); border-radius: 3px;
+  overflow: hidden; box-shadow: var(--shadow); background: #111;
+  display: flex; flex-direction: column;
+}
+#pip-wrap { position: relative; }
+#cam-pip video {
+  width: 100%; aspect-ratio: 4/3; display: block;
+  transform: scaleX(-1); object-fit: cover;
+}
+/* BUG 6 FIX: pip overlay canvas must NOT be CSS-flipped — we draw mirrored coords instead */
+#c-pip {
+  position: absolute; top: 0; left: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+  /* No scaleX(-1) here — landmark x is drawn as (1-lm.x) to match mirrored video */
+}
+#pip-label {
+  padding: 5px 8px; font-size: 7.5px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ash); background: var(--ui-bg);
+  border-top: 1px solid rgba(28,24,18,0.07);
+  display: flex; align-items: center; gap: 6px;
+}
+#status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #aaa; flex-shrink: 0; transition: background 0.3s;
+}
+#status-dot.live  { background: #5a9e5a; }
+#status-dot.error { background: var(--red); }
+
+/* ── Right panel ───────────────────────────────────── */
+#ui {
+  position: fixed; top: 0; right: 0; z-index: 20;
+  width: 192px; display: flex; flex-direction: column;
+  border-left: 1px solid rgba(28,24,18,0.08);
+  height: 100vh; overflow-y: auto; overflow-x: hidden;
+}
+#ui::-webkit-scrollbar { width: 0; }
+
+.panel {
+  background: var(--ui-bg); backdrop-filter: blur(8px);
+  border-bottom: 1px solid rgba(28,24,18,0.07); padding: 14px 16px;
+}
+.plabel {
+  font-family: 'Cormorant Garamond', serif; font-style: italic;
+  font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--ash); margin-bottom: 9px;
+}
+
+/* Symmetry grid */
+.axis-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 5px; }
+.ax {
+  aspect-ratio: 1; background: none;
+  border: 1px solid rgba(28,24,18,0.15); border-radius: 3px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background 0.1s; padding: 0;
+}
+.ax svg { width: 18px; height: 18px; }
+.ax svg line, .ax svg path {
+  stroke: var(--ink); stroke-width: 1.5; stroke-linecap: round; fill: none;
+}
+.ax:hover { background: rgba(28,24,18,0.06); }
+.ax.on { background: var(--ink); border-color: var(--ink); }
+.ax.on svg line, .ax.on svg path { stroke: var(--paper); }
+
+/* Track-point grid */
+.pt-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; }
+.pt-btn {
+  background: none; border: 1px solid rgba(28,24,18,0.15); border-radius: 3px;
+  padding: 6px 2px; font-size: 7.5px; font-family: 'Space Mono', monospace;
+  letter-spacing: 0.03em; color: var(--ink); cursor: pointer; text-align: center;
+  transition: all 0.1s;
+}
+.pt-btn:hover { background: rgba(28,24,18,0.06); }
+.pt-btn.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+/* Sliders */
+.row { display: flex; align-items: center; gap: 8px; margin-bottom: 1px; }
+input[type=range] {
+  flex: 1; -webkit-appearance: none;
+  height: 1px; background: rgba(28,24,18,0.18); border-radius: 1px; outline: none;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--ink); cursor: pointer;
+}
+.val { font-size: 8px; color: var(--ash); width: 22px; text-align: right; }
+.lbl { font-size: 7.5px; color: var(--ash); width: 40px; flex-shrink: 0; }
+
+/* Tones */
+.tones { display: flex; gap: 5px; flex-wrap: wrap; }
+.tone {
+  width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
+  border: 2px solid transparent; transition: transform 0.12s, border-color 0.12s; flex-shrink: 0;
+}
+.tone:hover { transform: scale(1.15); }
+.tone.on { border-color: var(--ink); }
+
+/* Toggle rows */
+.tog-row {
+  display: flex; align-items: center; justify-content: space-between; margin-top: 8px;
+}
+.tog-row:first-child { margin-top: 0; }
+.tog-label { font-size: 8px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ash); }
+.tog {
+  width: 28px; height: 14px; background: rgba(28,24,18,0.15); border-radius: 7px;
+  cursor: pointer; position: relative; border: none; transition: background 0.2s;
+}
+.tog::after {
+  content: ''; position: absolute; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--paper); top: 2px; left: 2px; transition: left 0.2s;
+}
+.tog.on { background: var(--ink); }
+.tog.on::after { left: 16px; }
+
+/* Buttons */
+.btns { display: flex; gap: 6px; }
+.btn {
+  flex: 1; background: none; border: 1px solid rgba(28,24,18,0.18); border-radius: 2px;
+  padding: 7px 2px; font-family: 'Space Mono', monospace; font-size: 7.5px;
+  letter-spacing: 0.05em; text-transform: uppercase; color: var(--ash); cursor: pointer;
+  transition: all 0.12s;
+}
+.btn:hover { color: var(--ink); border-color: var(--ink); }
+.btn.p { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.btn.p:hover { opacity: 0.8; }
+
+/* Title */
+#title { position: fixed; top: 20px; left: 24px; z-index: 20; pointer-events: none; }
+#title h1 {
+  font-family: 'Cormorant Garamond', serif; font-weight: 300; font-size: 22px;
+  color: var(--ink); letter-spacing: 0.02em; line-height: 1;
+}
+#title p {
+  font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 10px;
+  color: var(--ash); letter-spacing: 0.1em; margin-top: 3px;
+}
+
+/* Hint */
+#hint {
+  position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+  font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 12px;
+  letter-spacing: 0.07em; color: var(--ash); opacity: 0.7;
+  pointer-events: none; z-index: 20; white-space: nowrap; transition: opacity 0.5s;
+}
+
+/* Loading overlay */
+#loading {
+  position: fixed; inset: 0; background: var(--paper); z-index: 100;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  transition: opacity 0.6s;
+}
+#loading.gone { opacity: 0; pointer-events: none; }
+#loading h2 {
+  font-family: 'Cormorant Garamond', serif; font-weight: 300; font-size: 28px;
+  color: var(--ink); letter-spacing: 0.04em;
+}
+#loading p {
+  font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 12px;
+  color: var(--ash); letter-spacing: 0.08em; text-align: center; max-width: 260px; line-height: 1.7;
+}
+.spinner {
+  width: 32px; height: 32px; border: 1px solid rgba(28,24,18,0.15);
+  border-top-color: var(--ink); border-radius: 50%; animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Eyedropper button */
+.eyedrop-btn {
+  width: 20px; height: 20px; border-radius: 50%;
+  border: 1px solid rgba(28,24,18,0.2);
+  background: none; cursor: pointer; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.12s, border-color 0.12s;
+  padding: 0;
+}
+.eyedrop-btn:hover { background: rgba(28,24,18,0.08); border-color: rgba(28,24,18,0.4); }
+.eyedrop-btn svg { width: 11px; height: 11px; }
+.eyedrop-btn svg path { fill: var(--ash); }
+.eyedrop-btn:hover svg path { fill: var(--ink); }
+#cursor {
+  position: fixed; z-index: 50; width: 12px; height: 12px; border-radius: 50%;
+  border: 1px solid rgba(28,24,18,0.4); pointer-events: none;
+  transform: translate(-50%,-50%);
+}
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <h2>Clarion</h2>
+  <p>Loading hand tracking model.<br>Camera access required.</p>
+</div>
+
+<div id="cursor"></div>
+
+<div id="stage">
+  <canvas id="c-paper"></canvas>
+  <canvas id="c-acc"></canvas>
+  <!-- BUG 7 FIX: #c-live removed — was declared but never written to -->
+  <canvas id="c-skel"></canvas>
+</div>
+
+<div id="title">
+  <h1>Clarion</h1>
+  <p>3d movement · camera trace</p>
+</div>
+
+<div id="cam-pip">
+  <div id="pip-wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="c-pip"></canvas>
+  </div>
+  <div id="pip-label">
+    <div id="status-dot"></div>
+    <span id="pip-text">initialising</span>
+    <div id="trace-dot" title="tracing off" style="width:6px;height:6px;border-radius:50%;background:#b84040;flex-shrink:0;margin-left:auto;transition:background 0.2s;"></div>
+  </div>
+</div>
+
+<div id="ui">
+
+  <div class="panel">
+    <div class="plabel">Symmetry</div>
+    <div class="axis-grid">
+      <button class="ax on" data-m="vert" title="Vertical">
+        <svg viewBox="0 0 22 22"><line x1="11" y1="2" x2="11" y2="20"/></svg>
+      </button>
+      <button class="ax" data-m="horiz" title="Horizontal">
+        <svg viewBox="0 0 22 22"><line x1="2" y1="11" x2="20" y2="11"/></svg>
+      </button>
+      <button class="ax" data-m="diag" title="Diagonal">
+        <svg viewBox="0 0 22 22"><line x1="3" y1="19" x2="19" y2="3"/></svg>
+      </button>
+      <button class="ax" data-m="rot" title="Rotational">
+        <svg viewBox="0 0 22 22">
+          <path d="M6 11 A5 5 0 0 1 16 11"/>
+          <path d="M16 11 A5 5 0 0 1 6 11" stroke-dasharray="2,2"/>
+        </svg>
+      </button>
+      <button class="ax" data-m="r4" title="4-fold">
+        <svg viewBox="0 0 22 22">
+          <line x1="11" y1="2" x2="11" y2="20"/>
+          <line x1="2" y1="11" x2="20" y2="11"/>
+        </svg>
+      </button>
+      <button class="ax" data-m="r6" title="6-fold">
+        <svg viewBox="0 0 22 22">
+          <line x1="11" y1="2" x2="11" y2="20"/>
+          <line x1="3" y1="7" x2="19" y2="15"/>
+          <line x1="3" y1="15" x2="19" y2="7"/>
+        </svg>
+      </button>
+      <button class="ax" data-m="full" title="8-way">
+        <svg viewBox="0 0 22 22">
+          <line x1="11" y1="2" x2="11" y2="20"/>
+          <line x1="2" y1="11" x2="20" y2="11"/>
+          <line x1="3" y1="3" x2="19" y2="19"/>
+          <line x1="19" y1="3" x2="3" y2="19"/>
+        </svg>
+      </button>
+      <button class="ax" data-m="free" title="Free">
+        <svg viewBox="0 0 22 22">
+          <line x1="4" y1="18" x2="18" y2="4"/>
+          <line x1="4" y1="4" x2="8" y2="8"/>
+          <line x1="14" y1="14" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="plabel">Track point</div>
+    <div class="pt-grid">
+      <button class="pt-btn"    data-pt="0">Wrist</button>
+      <button class="pt-btn on" data-pt="9">Palm</button>
+      <button class="pt-btn"    data-pt="12">Mid tip</button>
+      <button class="pt-btn"    data-pt="8">Index</button>
+      <button class="pt-btn"    data-pt="4">Thumb</button>
+      <button class="pt-btn"    data-pt="multi">Multi</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="plabel">Stroke</div>
+    <div class="row">
+      <span class="lbl">Weight</span>
+      <input type="range" id="s-weight"  min="0.5" max="14" step="0.5" value="3">
+      <span class="val" id="v-weight">3</span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <span class="lbl">Opacity</span>
+      <input type="range" id="s-opacity" min="5" max="100" step="5" value="60">
+      <span class="val" id="v-opacity">60</span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <span class="lbl">Soft</span>
+      <input type="range" id="s-soft"    min="0" max="20" step="1" value="5">
+      <span class="val" id="v-soft">5</span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <span class="lbl">Z depth</span>
+      <input type="range" id="s-zdepth"  min="0" max="100" step="5" value="50">
+      <span class="val" id="v-zdepth">50</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="plabel">Tone</div>
+    <div class="tones">
+      <div class="tone on" data-c="37,41,28"   style="background:#25291C" title="Charcoal Brown"></div>
+      <div class="tone"    data-c="152,156,148" style="background:#989C94" title="Grey Olive"></div>
+      <div class="tone"    data-c="189,194,191" style="background:#BDC2BF" title="Silver"></div>
+      <div class="tone"    data-c="227,231,211" style="background:#E3E7D3" title="Beige"></div>
+      <div class="tone"    data-c="230,228,159" style="background:#E6E49F" title="Vanilla Custard"></div>
+      <button class="eyedrop-btn" id="eyedrop-tone" title="Pick custom stroke color">
+        <svg viewBox="0 0 12 12"><path d="M10.5 1.5a1.7 1.7 0 0 0-2.4 0L6.7 2.9 5.8 2 4.7 3.1l.9.9-4 4a1 1 0 0 0-.3.7v1.6h1.6a1 1 0 0 0 .7-.3l4-4 .9.9L9.6 5.8l-.9-.9 1.4-1.4a1.7 1.7 0 0 0 0-2.4z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <!-- BUG 8 FIX: HTML class reflects true initial state; JS reads it rather than duplicating -->
+    <div class="tog-row">
+      <span class="tog-label">Trail fade</span>
+      <button class="tog"    id="t-fade"></button>
+    </div>
+    <div class="tog-row">
+      <span class="tog-label">Skeleton</span>
+      <button class="tog on" id="t-skel"></button>
+    </div>
+    <div class="tog-row">
+      <span class="tog-label">Vel weight</span>
+      <button class="tog on" id="t-vel"></button>
+    </div>
+    <div class="tog-row">
+      <span class="tog-label">Z modulate</span>
+      <button class="tog on" id="t-zmod"></button>
+    </div>
+    <div class="tog-row">
+      <span class="tog-label">Mouse fallback</span>
+      <button class="tog on" id="t-mouse"></button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="plabel">Background</div>
+    <div class="tones">
+      <div class="tone bg-btn on" data-bg="242,237,228" style="background:#f2ede4" title="Paper"></div>
+      <div class="tone bg-btn"    data-bg="255,255,255" style="background:#ffffff;border:1px solid rgba(28,24,18,0.12)" title="White"></div>
+      <div class="tone bg-btn"    data-bg="37,41,28"    style="background:#25291C" title="Charcoal Brown"></div>
+      <div class="tone bg-btn"    data-bg="152,156,148" style="background:#989C94" title="Grey Olive"></div>
+      <div class="tone bg-btn"    data-bg="230,228,159" style="background:#E6E49F" title="Vanilla Custard"></div>
+      <button class="eyedrop-btn" id="eyedrop-bg" title="Pick custom background color">
+        <svg viewBox="0 0 12 12"><path d="M10.5 1.5a1.7 1.7 0 0 0-2.4 0L6.7 2.9 5.8 2 4.7 3.1l.9.9-4 4a1 1 0 0 0-.3.7v1.6h1.6a1 1 0 0 0 .7-.3l4-4 .9.9L9.6 5.8l-.9-.9 1.4-1.4a1.7 1.7 0 0 0 0-2.4z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="panel">
+      <button class="btn p" id="b-export">Save</button>
+      <button class="btn"   id="b-undo">Undo</button>
+      <button class="btn"   id="b-clear">Clear</button>
+    </div>
+  </div>
+
+</div>
+
+<div id="hint">position your hands · press space to trace</div>
+
+<script type="module">
+import { HandLandmarker, FilesetResolver }
+  from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+
+// ── Helpers ────────────────────────────────────────────────────────
+const W   = () => window.innerWidth;
+const H   = () => window.innerHeight;
+const DPR = Math.min(window.devicePixelRatio, 2);
+
+// ── Canvas refs ────────────────────────────────────────────────────
+const paperC = document.getElementById('c-paper');
+const accC   = document.getElementById('c-acc');
+const skelC  = document.getElementById('c-skel');
+const pipC   = document.getElementById('c-pip');
+const video  = document.getElementById('video');
+
+const paperCtx = paperC.getContext('2d');
+const accCtx   = accC.getContext('2d');
+const skelCtx  = skelC.getContext('2d');
+const pipCtx   = pipC.getContext('2d');
+// BUG 7 FIX: liveCtx removed — canvas never used
+
+// ── Resize — scales canvases and preserves accumulation ────────────
+function resizeAll() {
+  // Snapshot accumulation before resize clears it
+  const tmp = document.createElement('canvas');
+  tmp.width  = accC.width;
+  tmp.height = accC.height;
+  tmp.getContext('2d').drawImage(accC, 0, 0);
+
+  const cw = W() * DPR, ch = H() * DPR;
+  // BUG 7 FIX: liveC removed from this list
+  [paperC, accC, skelC].forEach(c => {
+    c.width  = cw;
+    c.height = ch;
+    c.style.width  = W() + 'px';
+    c.style.height = H() + 'px';
+  });
+  // canvas.width= resets the transform, so scale is applied fresh — not compounded
+  [paperCtx, accCtx, skelCtx].forEach(ctx => ctx.scale(DPR, DPR));
+
+  // Restore accumulation at logical pixel size
+  accCtx.drawImage(tmp, 0, 0, tmp.width / DPR, tmp.height / DPR);
+  drawPaper();
+}
+window.addEventListener('resize', resizeAll);
+
+let paperColor = '242,237,228'; // default warm paper — overridden by bg swatches
+
+function drawPaper() {
+  const r = paperColor;
+  // Flat fill for non-default colors; subtle gradient for the paper tone
+  if (r === '242,237,228') {
+    const g = paperCtx.createRadialGradient(W()/2, H()/2, H()*0.05, W()/2, H()/2, H()*0.85);
+    g.addColorStop(0,    '#f2ede4');
+    g.addColorStop(0.65, '#ede7db');
+    g.addColorStop(1,    '#e4ddd0');
+    paperCtx.fillStyle = g;
+  } else {
+    paperCtx.fillStyle = `rgb(${r})`;
+  }
+  paperCtx.fillRect(0, 0, W(), H());
+}
+
+// ── State ──────────────────────────────────────────────────────────
+let symmetry    = 'vert';
+let trackPt     = 9;
+let trackMulti  = false;
+let baseWeight  = 3;
+let baseOpacity = 60;
+let softness    = 5;
+let zDepthMix   = 50;
+let strokeColor = '37,41,28';  // Charcoal Brown — matches default tone swatch
+let trailFade   = false;
+let showSkel    = true;
+let velWeight   = true;
+let zModulate   = true;
+let mouseFB     = true;
+let isTracing   = false;  // spacebar toggles drawing on/off — off by default so hands can be positioned first
+
+// BUG 1 FIX: use a plain object with string keys only; no pre-seeded integer keys
+// Keys are built as `${handIndex}_${landmarkIndex}` strings throughout
+const prev  = {};   // key → {x, y}
+const prevZ = {};   // key → z value
+const prevT = {};   // key → timestamp
+
+// Mouse fallback
+let mouseDown  = false;
+let mousePrev  = null;
+let mousePrevT = 0;
+
+// Undo stack
+const undoStack = [];
+const MAX_UNDO  = 20;
+
+function pushUndo() {
+  undoStack.push(accCtx.getImageData(0, 0, accC.width, accC.height));
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
+}
+
+// ── Audio ──────────────────────────────────────────────────────────
+const ACtxCtor = window.AudioContext || window.webkitAudioContext;
+let actx;
+
+// BUG 9 FIX: ensureAudio is called inside chime() so camera-driven strokes
+// also attempt to resume/create the context — wrapped in try so autoplay
+// policy failures are swallowed gracefully rather than silently preventing audio
+function ensureAudio() {
+  if (!actx) actx = new ACtxCtor();
+  if (actx.state === 'suspended') actx.resume();
+}
+
+const PENT = [196, 220, 261.63, 293.66, 329.63, 392, 440, 523.25, 659.25, 784];
+let lastChimeT = 0;
+
+function chime(vel = 1, z = 0) {
+  const now = Date.now();
+  if (now - lastChimeT < 90) return;
+  lastChimeT = now;
+  try {
+    // BUG 9 FIX: ensureAudio() called here so every code path — mouse AND camera — unifies
+    ensureAudio();
+    const baseIdx = Math.floor(Math.random() * PENT.length);
+    // z from MediaPipe is in metres; scale to a small integer shift across the scale
+    const zShift  = Math.round(Math.max(-1, Math.min(1, z)) * 3);
+    const freq    = PENT[Math.max(0, Math.min(PENT.length - 1, baseIdx + zShift))];
+    const vol     = Math.min(0.12, 0.03 + vel * 0.004);
+
+    const osc  = actx.createOscillator();
+    const gain = actx.createGain();
+    osc.connect(gain);
+    gain.connect(actx.destination);
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, actx.currentTime);
+    gain.gain.linearRampToValueAtTime(vol, actx.currentTime + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.5);
+    osc.start(actx.currentTime);
+    osc.stop(actx.currentTime + 0.5);
+  } catch (_) {}
+}
+
+// ── Symmetry mirror ────────────────────────────────────────────────
+function mirror(x, y) {
+  const cx = W() / 2, cy = H() / 2;
+  const dx = x - cx,  dy = y - cy;
+  switch (symmetry) {
+    case 'vert':  return [[x, y], [cx - dx, y]];
+    case 'horiz': return [[x, y], [x, cy - dy]];
+    case 'diag':  return [[x, y], [cx + dy, cy + dx]];
+    case 'rot':   return [[x, y], [cx - dx, cy - dy]];
+    case 'r4':    return [[x, y], [cx - dx, y], [x, cy - dy], [cx - dx, cy - dy]];
+    case 'r6': {
+      const pts = [];
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        pts.push([cx + dx * Math.cos(a) - dy * Math.sin(a),
+                  cy + dx * Math.sin(a) + dy * Math.cos(a)]);
+      }
+      return pts;
+    }
+    case 'full':
+      return [
+        [x, y],          [cx - dx, y],
+        [x, cy - dy],    [cx - dx, cy - dy],
+        [cx + dy, cy + dx], [cx - dy, cy + dx],
+        [cx + dy, cy - dx], [cx - dy, cy - dx],
+      ];
+    default: return [[x, y]];
+  }
+}
+
+// ── Core stroke renderer ───────────────────────────────────────────
+// BUG 2 FIX: added weightMul parameter so hand openness can modulate weight
+function drawStroke(x1, y1, x2, y2, vel, z, weightMul = 1) {
+  // z is world metres from MediaPipe — negative = closer to camera
+  const zNorm   = zModulate ? Math.max(-1, Math.min(1, -z * 5)) : 0;
+  const zFactor = 1 + zNorm * (zDepthMix / 100);
+
+  const alpha  = (baseOpacity / 100)
+               * Math.max(0.1, zFactor)
+               * (velWeight ? Math.max(0.3, 1 - vel * 0.01) : 1);
+
+  // BUG 2 FIX: weightMul applied here so openness actually reaches the canvas
+  const weight = baseWeight * weightMul
+               * Math.max(0.3, zFactor)
+               * (velWeight ? Math.max(0.3, 1 - vel * 0.012) : 1);
+
+  const pts1 = mirror(x1, y1);
+  const pts2 = mirror(x2, y2);
+
+  for (let i = 0; i < pts1.length; i++) {
+    const [ax, ay] = pts1[i];
+    const [bx, by] = pts2[i];
+
+    accCtx.save();
+    accCtx.globalAlpha = Math.min(1, alpha);
+    accCtx.lineWidth   = weight;
+    accCtx.lineCap     = 'round';
+    accCtx.lineJoin    = 'round';
+    accCtx.strokeStyle = `rgb(${strokeColor})`;
+
+    if (softness > 0) {
+      accCtx.shadowColor = `rgba(${strokeColor},${alpha * 0.45})`;
+      accCtx.shadowBlur  = softness * 2;
+    }
+    accCtx.beginPath();
+    accCtx.moveTo(ax, ay);
+    accCtx.lineTo(bx, by);
+    accCtx.stroke();
+
+    // Powder dust halo
+    if (softness > 0) {
+      accCtx.globalAlpha = Math.min(1, alpha * 0.12);
+      accCtx.lineWidth   = weight + softness * 1.8;
+      accCtx.shadowBlur  = 0;
+      accCtx.beginPath();
+      accCtx.moveTo(ax, ay);
+      accCtx.lineTo(bx, by);
+      accCtx.stroke();
+    }
+    accCtx.restore();
+  }
+}
+
+// ── Hand openness (finger spread) ─────────────────────────────────
+function handOpenness(lms) {
+  const tips = [4, 8, 12, 16, 20];
+  let sum = 0;
+  tips.forEach(i => {
+    const dx = lms[i].x - lms[0].x;
+    const dy = lms[i].y - lms[0].y;
+    sum += Math.sqrt(dx * dx + dy * dy);
+  });
+  return sum / tips.length; // ~0.05–0.35 normalised
+}
+
+// ── Skeleton connections (MediaPipe hand topology) ─────────────────
+const CONN = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[0,17],[17,18],[18,19],[19,20],
+];
+
+function drawSkeleton(landmarks, handLabel) {
+  if (!showSkel) return;
+  const col = handLabel === 'Left' ? '80,100,140' : '140,90,80';
+
+  landmarks.forEach(lm => {
+    const sx = (1 - lm.x) * W();
+    const sy = lm.y * H();
+    const r  = Math.max(2, 4 + lm.z * -10);
+    skelCtx.save();
+    skelCtx.globalAlpha = 0.55;
+    skelCtx.fillStyle   = `rgba(${col},0.7)`;
+    skelCtx.beginPath();
+    skelCtx.arc(sx, sy, r, 0, Math.PI * 2);
+    skelCtx.fill();
+    skelCtx.restore();
+  });
+
+  CONN.forEach(([a, b]) => {
+    const la = landmarks[a], lb = landmarks[b];
+    skelCtx.save();
+    skelCtx.globalAlpha = 0.3;
+    skelCtx.strokeStyle = `rgba(${col},0.6)`;
+    skelCtx.lineWidth   = 0.8;
+    skelCtx.beginPath();
+    skelCtx.moveTo((1 - la.x) * W(), la.y * H());
+    skelCtx.lineTo((1 - lb.x) * W(), lb.y * H());
+    skelCtx.stroke();
+    skelCtx.restore();
+  });
+}
+
+// BUG 4 FIX: use pipC.width / pipC.height (intrinsic px), not offsetWidth/offsetHeight (CSS px)
+// BUG 5 FIX: pipCtx is cleared at the top of detectLoop; this fn just draws, for any hand
+// BUG 6 FIX: draw at (1-lm.x)*pw to match the CSS-mirrored video; no scaleX on canvas
+function drawPipSkeleton(landmarks) {
+  const pw = pipC.width;   // intrinsic canvas pixels — BUG 4 FIX
+  const ph = pipC.height;
+  CONN.forEach(([a, b]) => {
+    const la = landmarks[a], lb = landmarks[b];
+    pipCtx.save();
+    pipCtx.strokeStyle = 'rgba(255,220,100,0.7)';
+    pipCtx.lineWidth   = 1;
+    pipCtx.beginPath();
+    // BUG 6 FIX: (1-lm.x) mirrors coords to match scaleX(-1) on the video element
+    pipCtx.moveTo((1 - la.x) * pw, la.y * ph);
+    pipCtx.lineTo((1 - lb.x) * pw, lb.y * ph);
+    pipCtx.stroke();
+    pipCtx.restore();
+  });
+  landmarks.forEach(lm => {
+    pipCtx.save();
+    pipCtx.fillStyle = 'rgba(255,220,100,0.9)';
+    pipCtx.beginPath();
+    pipCtx.arc((1 - lm.x) * pw, lm.y * ph, 2, 0, Math.PI * 2); // BUG 6 FIX
+    pipCtx.fill();
+    pipCtx.restore();
+  });
+}
+
+// ── MediaPipe detection loop ───────────────────────────────────────
+let handLandmarker = null;
+let lastVideoTime  = -1;
+
+async function initMediaPipe() {
+  const fileset = await FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+  );
+  handLandmarker = await HandLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetPath:
+        'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+      delegate: 'GPU',
+    },
+    runningMode: 'VIDEO',
+    numHands: 2,
+    minHandDetectionConfidence: 0.5,
+    minHandPresenceConfidence:  0.5,
+    minTrackingConfidence:      0.5,
+  });
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+    audio: false,
+  });
+  video.srcObject = stream;
+
+  video.addEventListener('loadeddata', () => {
+    // Size pip canvas to true video pixel dimensions
+    pipC.width  = video.videoWidth;
+    pipC.height = video.videoHeight;
+    // Let CSS handle layout scaling
+    pipC.style.width  = '100%';
+    pipC.style.height = '100%';
+
+    document.getElementById('status-dot').classList.add('live');
+    document.getElementById('pip-text').textContent = 'tracking';
+    document.getElementById('loading').classList.add('gone');
+    document.getElementById('hint').textContent = 'position your hands · press space to trace';
+    requestAnimationFrame(detectLoop);
+  });
+}
+
+function detectLoop(ts) {
+  requestAnimationFrame(detectLoop);
+
+  // BUG 5 FIX: always clear skelCtx and pipCtx at frame start, regardless of how many hands
+  skelCtx.clearRect(0, 0, W(), H());
+  pipCtx.clearRect(0, 0, pipC.width, pipC.height);  // BUG 5 FIX: clear pip every frame
+
+  if (!handLandmarker || video.readyState < 2) return;
+  if (video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+
+  const result = handLandmarker.detectForVideo(video, ts);
+
+  // Trail fade — destination-out on accCtx only, no drawPaper needed (paperC is a separate layer)
+  // BUG 3 FIX: removed erroneous drawPaper() call that was painting to paperCtx every fade frame
+  if (trailFade) {
+    accCtx.save();
+    accCtx.globalCompositeOperation = 'destination-out';
+    accCtx.globalAlpha = 0.006;
+    accCtx.fillRect(0, 0, W(), H());
+    accCtx.restore();
+    // No drawPaper() here — paperC sits underneath and is always opaque
+  }
+
+  const handsDetected = result.landmarks?.length ?? 0;
+
+  if (handsDetected > 0) {
+    result.landmarks.forEach((lms, hi) => {
+      const handLabel = result.handednesses[hi]?.[0]?.categoryName ?? 'Right';
+
+      // Draw skeleton on full-canvas overlay
+      drawSkeleton(lms, handLabel);
+
+      // BUG 5 FIX: draw pip skeleton for ALL detected hands, not just hi===0
+      drawPipSkeleton(lms);
+
+      // Compute openness once per hand for weight modulation
+      // BUG 2 FIX: openFactor is now passed through to drawStroke instead of being dead code
+      const open       = handOpenness(lms);
+      const openFactor = Math.max(0.2, Math.min(1.5, open * 5));
+
+      const pointIndices = trackMulti ? [4, 8, 12, 16, 20] : [trackPt];
+
+      pointIndices.forEach(ptIdx => {
+        const lm = lms[ptIdx];
+        if (!lm) return;
+
+        const sx  = (1 - lm.x) * W();  // flip X for mirrored camera
+        const sy  = lm.y * H();
+        const sz  = lm.z;
+
+        // BUG 1 FIX: string keys like "0_9", "1_4" used throughout — prev initialised as {}
+        const key = `${hi}_${ptIdx}`;
+        const now = performance.now();
+
+        if (prev[key]) {
+          const dx   = sx - prev[key].x;
+          const dy   = sy - prev[key].y;
+          const dz   = sz - (prevZ[key] ?? sz);
+          const dt   = Math.max(1, now - (prevT[key] ?? now));
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz * 10000);
+          const vel  = dist / dt * 16;
+
+          if (dist > 0.3 && isTracing) {
+            // BUG 2 FIX: pass openFactor as weightMul so hand openness modulates stroke width
+            drawStroke(prev[key].x, prev[key].y, sx, sy, vel, sz, openFactor);
+            chime(vel, sz);
+          }
+        } else {
+          // New stroke starting — push undo once per hand per appearance
+          if (ptIdx === (trackMulti ? 4 : trackPt) && hi === 0) pushUndo();
+        }
+
+        prev[key]  = { x: sx, y: sy };
+        prevZ[key] = sz;
+        prevT[key] = now;
+      });
+    });
+  }
+
+  // BUG 1 FIX: reset prev entries properly using actual string keys, not integer keys
+  if (handsDetected === 0) {
+    // All hands lost — clear all tracked positions
+    Object.keys(prev).forEach(k => { prev[k] = null; });
+  } else if (handsDetected === 1) {
+    // Second hand lost — clear only second-hand keys (those starting with "1_")
+    Object.keys(prev).filter(k => k.startsWith('1_')).forEach(k => { prev[k] = null; });
+  }
+}
+
+// ── Mouse fallback ─────────────────────────────────────────────────
+document.getElementById('c-acc').addEventListener('pointerdown', e => {
+  if (!mouseFB) return;
+  ensureAudio();
+  mouseDown  = true;
+  mousePrev  = { x: e.clientX, y: e.clientY };
+  mousePrevT = performance.now();
+  pushUndo();
+});
+window.addEventListener('pointermove', e => {
+  document.getElementById('cursor').style.cssText =
+    `left:${e.clientX}px;top:${e.clientY}px`;
+
+  if (!mouseFB || !mouseDown || !mousePrev || !isTracing) return;
+  const now  = performance.now();
+  const dx   = e.clientX - mousePrev.x;
+  const dy   = e.clientY - mousePrev.y;
+  const dt   = Math.max(1, now - mousePrevT);
+  const vel  = Math.sqrt(dx * dx + dy * dy) / dt * 16;
+  // Mouse has no openness concept — weightMul = 1
+  drawStroke(mousePrev.x, mousePrev.y, e.clientX, e.clientY, vel, 0, 1);
+  chime(vel, 0);
+  mousePrev  = { x: e.clientX, y: e.clientY };
+  mousePrevT = now;
+});
+window.addEventListener('pointerup', () => { mouseDown = false; mousePrev = null; });
+
+// ── Spacebar trace toggle ──────────────────────────────────────────
+// Pressing space starts/stops drawing — lets hands be repositioned without leaving trails
+window.addEventListener('keydown', e => {
+  if (e.code !== 'Space' || e.repeat) return;
+  e.preventDefault();
+  isTracing = !isTracing;
+
+  // Clear all prev positions when tracing is turned OFF so the next
+  // time it's enabled the first frame doesn't draw a line from the old position
+  if (!isTracing) {
+    Object.keys(prev).forEach(k => { prev[k] = null; });
+    mousePrev = null;
+  }
+
+  // Update hint and status indicator
+  const hint = document.getElementById('hint');
+  const dot  = document.getElementById('trace-dot');
+  if (isTracing) {
+    hint.textContent = 'tracing · press space to pause';
+    if (dot) { dot.style.background = '#5a9e5a'; dot.title = 'tracing on'; }
+  } else {
+    hint.textContent = 'paused · press space to trace';
+    if (dot) { dot.style.background = '#b84040'; dot.title = 'tracing off'; }
+  }
+});
+// ── Eyedropper — stroke tone ───────────────────────────────────────
+// EyeDropper API is supported in Chrome/Edge 95+; gracefully hidden on unsupported browsers
+const eyedropToneBtn = document.getElementById('eyedrop-tone');
+const eyedropBgBtn   = document.getElementById('eyedrop-bg');
+
+// Hide buttons entirely if API is unavailable
+if (!window.EyeDropper) {
+  if (eyedropToneBtn) eyedropToneBtn.style.display = 'none';
+  if (eyedropBgBtn)   eyedropBgBtn.style.display   = 'none';
+}
+
+function hexToRgbStr(hex) {
+  // Accepts #RRGGBB
+  const r = parseInt(hex.slice(1,3), 16);
+  const g = parseInt(hex.slice(3,5), 16);
+  const b = parseInt(hex.slice(5,7), 16);
+  return `${r},${g},${b}`;
+}
+
+if (eyedropToneBtn && window.EyeDropper) {
+  eyedropToneBtn.addEventListener('click', async () => {
+    try {
+      const result = await new EyeDropper().open();
+      const rgb = hexToRgbStr(result.sRGBHex);
+      // Deselect all swatches, apply picked color
+      document.querySelectorAll('.tone:not(.bg-btn)').forEach(x => x.classList.remove('on'));
+      // Update the eyedropper button itself to show the picked color as a swatch
+      eyedropToneBtn.style.background = result.sRGBHex;
+      eyedropToneBtn.style.border = '2px solid var(--ink)';
+      strokeColor = rgb;
+    } catch (_) { /* user cancelled */ }
+  });
+}
+
+if (eyedropBgBtn && window.EyeDropper) {
+  eyedropBgBtn.addEventListener('click', async () => {
+    try {
+      const result = await new EyeDropper().open();
+      const rgb = hexToRgbStr(result.sRGBHex);
+      document.querySelectorAll('.bg-btn').forEach(x => x.classList.remove('on'));
+      eyedropBgBtn.style.background = result.sRGBHex;
+      eyedropBgBtn.style.border = '2px solid var(--ink)';
+      paperColor = rgb;
+      drawPaper();
+    } catch (_) { /* user cancelled */ }
+  });
+}
+
+document.querySelectorAll('.bg-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.bg-btn').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    paperColor = b.dataset.bg;
+    drawPaper();
+    // Reset eyedropper button back to neutral
+    if (eyedropBgBtn) {
+      eyedropBgBtn.style.background = '';
+      eyedropBgBtn.style.border = '';
+    }
+  });
+});
+
+document.querySelectorAll('.ax').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.ax').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    symmetry = b.dataset.m;
+  });
+});
+
+document.querySelectorAll('.pt-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.pt-btn').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    trackMulti = b.dataset.pt === 'multi';
+    if (!trackMulti) trackPt = +b.dataset.pt;
+    // Clear all prev so no phantom lines when switching track point mid-session
+    Object.keys(prev).forEach(k => { prev[k] = null; });
+  });
+});
+
+document.querySelectorAll('.tone:not(.bg-btn)').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tone:not(.bg-btn)').forEach(x => x.classList.remove('on'));
+    t.classList.add('on');
+    strokeColor = t.dataset.c;
+    // Reset eyedropper button back to neutral if it was showing a picked color
+    if (eyedropToneBtn) {
+      eyedropToneBtn.style.background = '';
+      eyedropToneBtn.style.border = '';
+    }
+  });
+});
+
+function wireSlider(id, valId, setter) {
+  const el = document.getElementById(id);
+  const vl = document.getElementById(valId);
+  el.addEventListener('input', () => { setter(+el.value); vl.textContent = el.value; });
+}
+wireSlider('s-weight',  'v-weight',  v => baseWeight  = v);
+wireSlider('s-opacity', 'v-opacity', v => baseOpacity = v);
+wireSlider('s-soft',    'v-soft',    v => softness    = v);
+wireSlider('s-zdepth',  'v-zdepth',  v => zDepthMix   = v);
+
+// BUG 8 FIX: read initial JS state from HTML class, don't fight over who sets 'on'
+// classList.toggle() returns the new state — no need to track separately
+function wireToggle(id, onCallback, offCallback) {
+  const el = document.getElementById(id);
+  // Sync JS variable to whatever the HTML says at startup
+  onCallback(el.classList.contains('on'));
+  el.addEventListener('click', () => {
+    const isOn = el.classList.toggle('on');
+    if (isOn) onCallback(true); else offCallback(false);
+  });
+}
+// Each callback receives a boolean — we just apply it to the right variable
+wireToggle('t-fade',  v => trailFade = v,   v => trailFade = v);
+wireToggle('t-skel',  v => showSkel  = v,   v => showSkel  = v);
+wireToggle('t-vel',   v => velWeight = v,   v => velWeight = v);
+wireToggle('t-zmod',  v => zModulate = v,   v => zModulate = v);
+wireToggle('t-mouse', v => mouseFB   = v,   v => mouseFB   = v);
+
+document.getElementById('b-undo').addEventListener('click', () => {
+  if (!undoStack.length) return;
+  accCtx.putImageData(undoStack.pop(), 0, 0);
+});
+
+document.getElementById('b-clear').addEventListener('click', () => {
+  pushUndo();
+  accCtx.clearRect(0, 0, W(), H());
+});
+
+document.getElementById('b-export').addEventListener('click', () => {
+  // Export strokes only — transparent background so the PNG can be placed on any surface
+  const out = document.createElement('canvas');
+  out.width  = accC.width;
+  out.height = accC.height;
+  const oc   = out.getContext('2d');
+  // Draw accumulation canvas directly — paperC is intentionally excluded
+  oc.drawImage(accC, 0, 0);
+
+  const link    = document.createElement('a');
+  link.download = `clarion-${Date.now()}.png`;
+  link.href     = out.toDataURL('image/png');
+  link.click();
+});
+
+// ── Init ───────────────────────────────────────────────────────────
+resizeAll(); // also calls drawPaper()
+
+initMediaPipe().catch(err => {
+  console.warn('MediaPipe init failed:', err);
+  document.getElementById('status-dot').classList.add('error');
+  document.getElementById('pip-text').textContent = 'camera error';
+  document.getElementById('loading').classList.add('gone');
+  document.getElementById('hint').textContent = 'camera unavailable · using mouse';
+});
+</script>
+</body>
+</html>
